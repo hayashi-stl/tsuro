@@ -1,6 +1,6 @@
 use cgmath::{Basis2, ElementWise, InnerSpace, Rad, Rotation, Rotation2, vec2};
 use svg::{Document, node::element::{Group, Path, path::Data}};
-use std::f64::consts::TAU as TAU;
+use std::{f64::consts::TAU as TAU, io::Write, path::PathBuf, process::{Command, Stdio}};
 
 mod util;
 
@@ -35,17 +35,17 @@ fn diamond_tile(side_length: f64, short_angle: f64, connection: &[u32]) -> Group
     ];
 
     let turn_90 = Basis2::from_angle(Rad(TAU / 4.0));
-    const ACUTE_SCALE: f64 = 0.15;
-    const OBTUSE_SCALE: f64 = 0.5;
+    let acute_scale = if short_angle >= TAU * 0.15 { 0.35 } else { 0.15 };
+    let obtuse_scale = 0.5;
     let inner_normals = [
-        turn_90.rotate_vector(-straight.normalize()) * ACUTE_SCALE,
-        turn_90.rotate_vector(-straight.normalize()) * OBTUSE_SCALE,
-        turn_90.rotate_vector(-angled.normalize()) * OBTUSE_SCALE,
-        turn_90.rotate_vector(-angled.normalize()) * ACUTE_SCALE,
-        turn_90.rotate_vector(straight.normalize()) * ACUTE_SCALE,
-        turn_90.rotate_vector(straight.normalize()) * OBTUSE_SCALE,
-        turn_90.rotate_vector(angled.normalize()) * OBTUSE_SCALE,
-        turn_90.rotate_vector(angled.normalize()) * ACUTE_SCALE,
+        turn_90.rotate_vector(-straight.normalize()) * acute_scale,
+        turn_90.rotate_vector(-straight.normalize()) * obtuse_scale,
+        turn_90.rotate_vector(-angled.normalize()) * obtuse_scale,
+        turn_90.rotate_vector(-angled.normalize()) * acute_scale,
+        turn_90.rotate_vector(straight.normalize()) * acute_scale,
+        turn_90.rotate_vector(straight.normalize()) * obtuse_scale,
+        turn_90.rotate_vector(angled.normalize()) * obtuse_scale,
+        turn_90.rotate_vector(angled.normalize()) * acute_scale,
     ];
 
     let mut group = Group::new().add(path);
@@ -81,34 +81,104 @@ fn new_page() -> Document {
         .set("viewBox", (0.0, 0.0, WIDTH, HEIGHT))
 }
 
-fn main() {
-    let thin_spacing = vec2(DIAMOND_SIDE * (TAU * 0.15).cos(), DIAMOND_SIDE);
-    let thin_offsets = (0..5).flat_map(|x| (0..3).map(move |y| 
-        vec2(WIDTH, HEIGHT) / 2.0 + thin_spacing.mul_element_wise(vec2(x as f64 - 2.0, y as f64 - 1.0))))
-        .collect::<Vec<_>>();
+#[derive(Clone, Copy, Debug)]
+struct DiamondParameters {
+    short_angle: f64,
+    rows: usize,
+    columns: usize,
+    name: &'static str,
+}
 
+const THIN: DiamondParameters = DiamondParameters {
+    short_angle: TAU * 0.1,
+    rows: 3,
+    columns: 5,
+    name: "thin"
+};
+
+const FAT: DiamondParameters = DiamondParameters {
+    short_angle: TAU * 0.2,
+    rows: 4,
+    columns: 3,
+    name: "fat"
+};
+
+fn convert_svgs_to_pdfs(svgs: &[PathBuf]) -> Vec<PathBuf> {
+    let pdfs = svgs.iter().map(|path| path.with_extension("pdf")).collect::<Vec<_>>();
+    let shell = svgs.iter().zip(pdfs.iter()).map(|(svg, pdf)|
+        format!("file-open:{}; export-filename:{}; export-do; ", svg.to_string_lossy(), pdf.to_string_lossy()))
+    .collect::<String>();
+
+    let echo_child = Command::new("echo")
+        .arg(&shell)
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("Failed to start echo");
+
+    let echo_stdout = echo_child.stdout.expect("Failed to get output");
+    let mut child = Command::new("inkscape")
+        .arg("--shell")
+        .stdin(Stdio::from(echo_stdout))
+        .spawn()
+        .expect("Failed to start inkscape to convert svgs to pdfs");
+
+    child.wait().expect("Inkscape failed");
+    pdfs
+}
+
+fn combine_pdfs(pdfs: &[PathBuf], output: impl AsRef<std::path::Path>) {
+    let mut command = &mut Command::new("pdfunite");
+    for pdf in pdfs {
+        command = command.arg(&*pdf.to_string_lossy());
+    }
+    let child = command.arg(&*output.as_ref().to_string_lossy())
+        .spawn()
+        .expect("Failed to start pdfunite")
+        .wait()
+        .expect("pdfunite failed");
+}
+
+fn main() {
     let connections = util::connections(8, util::equivalent_rotation_180);
 
-    let mut diamonds = connections.iter().map(|connection| {
-        diamond_tile(DIAMOND_SIDE, TAU / 10.0, connection)
-    }).peekable();
-    
-    let mut num_docs = 0;
-    while diamonds.peek().is_some() {
-        let page_diamonds = std::iter::repeat_with(|| diamonds.next())
-            .take(thin_offsets.len())
-            .flatten()
-            .enumerate()
-            .map(|(i, diamond)| {
-            diamond.set("transform", format!("translate({}, {})", thin_offsets[i].x, thin_offsets[i].y))
-        });
+    let mut filenames = vec![];
 
-        let mut doc = new_page();
-        for diamond in page_diamonds {
-            doc = doc.add(diamond);
+    for kind in [THIN, FAT] {
+        let spacing = vec2(DIAMOND_SIDE * kind.short_angle.sin(), DIAMOND_SIDE);
+        let offsets = (0..kind.columns).flat_map(|x| (0..kind.rows).map(move |y| 
+            vec2(WIDTH, HEIGHT) / 2.0 + spacing
+                .mul_element_wise(vec2(
+                    x as f64 - kind.columns as f64 / 2.0 + 0.5, 
+                    y as f64 - kind.rows as f64 / 2.0 + 0.5,
+                ))))
+            .collect::<Vec<_>>();
+
+        let mut diamonds = connections.iter().map(|connection| {
+            diamond_tile(DIAMOND_SIDE, kind.short_angle, connection)
+        }).peekable();
+        
+        let mut num_docs = 0;
+        while diamonds.peek().is_some() {
+            let page_diamonds = std::iter::repeat_with(|| diamonds.next())
+                .take(offsets.len())
+                .flatten()
+                .enumerate()
+                .map(|(i, diamond)| {
+                diamond.set("transform", format!("translate({}, {})", offsets[i].x, offsets[i].y))
+            });
+
+            let mut doc = new_page();
+            for diamond in page_diamonds {
+                doc = doc.add(diamond);
+            }
+
+            let filename = PathBuf::from(format!("output/diamond_{}_{}.svg", kind.name, num_docs));
+            svg::save(&filename, &doc).unwrap();
+            filenames.push(filename);
+            num_docs += 1;
         }
-
-        svg::save(format!("ignore/diamond_{}.svg", num_docs), &doc).unwrap();
-        num_docs += 1;
     }
+    
+    let pdfs = convert_svgs_to_pdfs(&filenames);
+    combine_pdfs(&pdfs, "output/diamond.pdf");
 }
