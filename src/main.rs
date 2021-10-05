@@ -23,20 +23,21 @@ fn diamond_tile(side_length: f64, short_angle: f64, connection: &[u32]) -> Group
         .set("stroke-width", 1.0 / 96.0)
         .set("d", path_data);
 
+    let offset_factor = 1.0 / 3.0;
     let points = [
-        top_left_offset + straight * 0.25,
-        top_left_offset + straight * 0.75,
-        top_left_offset + straight + angled * 0.25,
-        top_left_offset + straight + angled * 0.75,
-        top_left_offset + straight * 0.75 + angled,
-        top_left_offset + straight * 0.25 + angled,
-        top_left_offset + angled * 0.75,
-        top_left_offset + angled * 0.25
+        top_left_offset + straight * offset_factor,
+        top_left_offset + straight * (1.0 - offset_factor),
+        top_left_offset + straight + angled * offset_factor,
+        top_left_offset + straight + angled * (1.0 - offset_factor),
+        top_left_offset + straight * (1.0 - offset_factor) + angled,
+        top_left_offset + straight * offset_factor + angled,
+        top_left_offset + angled * (1.0 - offset_factor),
+        top_left_offset + angled * offset_factor
     ];
 
     let turn_90 = Basis2::from_angle(Rad(TAU / 4.0));
-    let acute_scale = if short_angle >= TAU * 0.15 { 0.35 } else { 0.15 };
-    let obtuse_scale = 0.5;
+    let acute_scale = if short_angle >= TAU * 0.15 { 0.35 } else { 0.25 };
+    let obtuse_scale = if short_angle >= TAU * 0.15 { 0.5 } else { 0.4 };
     let inner_normals = [
         turn_90.rotate_vector(-straight.normalize()) * acute_scale,
         turn_90.rotate_vector(-straight.normalize()) * obtuse_scale,
@@ -140,8 +141,13 @@ fn combine_pdfs(pdfs: &[PathBuf], output: impl AsRef<std::path::Path>) {
 
 fn main() {
     let connections = util::connections(8, util::equivalent_rotation_180);
+    for connection in connections.iter() {
+        println!("{:?}", connection);
+    }
+    return;
 
     let mut filenames = vec![];
+    let name = "diamond_third";
 
     for kind in [THIN, FAT] {
         let spacing = vec2(DIAMOND_SIDE * kind.short_angle.sin(), DIAMOND_SIDE);
@@ -172,7 +178,7 @@ fn main() {
                 doc = doc.add(diamond);
             }
 
-            let filename = PathBuf::from(format!("output/diamond_{}_{}.svg", kind.name, num_docs));
+            let filename = PathBuf::from(format!("output/{}_{}_{}.svg", name, kind.name, num_docs));
             svg::save(&filename, &doc).unwrap();
             filenames.push(filename);
             num_docs += 1;
@@ -180,5 +186,5 @@ fn main() {
     }
     
     let pdfs = convert_svgs_to_pdfs(&filenames);
-    combine_pdfs(&pdfs, "output/diamond.pdf");
+    combine_pdfs(&pdfs, &format!("output/{}.pdf", name));
 }
